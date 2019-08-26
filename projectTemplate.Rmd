@@ -1,0 +1,399 @@
+---
+title: "STAT 432 Final Project: Popular Tweet Classification Analysis"
+subtitle: "Prepared by Team BKB"
+author: "Haozhe Wang (hwang270); Ziwei Liu (ziweil2); Jiayi Chen (jchen246) <br> Professor: Ruoqing Zhu"
+date: "Dec 15, 2018"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Part 1: Introduction and literature review
+Recently, people are increasingly using social media to understand the events in the world. This new form of media has changed the way people exchange messages and information. We would like to investigate the Online News Popularity Data Set from UCI Machine Learning Repository (citation#1) to understand what decides the popularity of an online news.
+
+The Online News Popularity Data Set has 39797 rows of data and 61 attributes (58 predicative attributes, 2 non-predictive and 1 goal field), including number of words, number of images and average length of the words in the content. 
+
+The target variable is the number of shares of an online news. By performing methods introduced in this course with an emphasis on classification, we hope to gain a broader picture of this data set.
+
+There is a paper (citation #2), **A Proactive Intelligent Decision Support System for Predicting the Popularity of Online News**, written by Kelwin Fernandes, Pedro Vinagre and Paulo Cortez, which studies this data set. Some of the models in this project may have been used in this paper.
+
+
+# Part 2: Summary Statistics and Data Visualization
+
+```{r set up, warning=FALSE, message=FALSE}
+pkgs <- c("ggplot2", "plot3D", "glmnet", "MASS", "randomForest", "adabag", "class",
+          "e1071", "ridge")
+loaded <- lapply(pkgs, require, character.only = TRUE)
+```
+
+## 2.1 Overall Statistics and Graphical Analysis
+We first read the data
+```{r}
+news = read.csv("OnlineNewsPopularity.csv", header = TRUE)
+# remove non-predictive attributes
+news = data.frame(news[,c(-1,-2)])
+```
+
+Here are some statistics of the dataset:
+```{r}
+y = news["shares"]
+y = y[,1]
+left = range(y)[1]
+right = range(y)[2]
+cat("The range of the shares is (", left, ",", right, ")","\n")
+cat("The mean of the shares is", mean(y), "\n")
+cat("The median of the shares is", median(y), "\n")
+# mode
+# from https://stackoverflow.com/questions/2547402/is-there-a-built-in-function-for-
+# finding-the-mode
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+cat("The mode of the shares is", Mode(y), "\n")
+```
+
+We can see that the range of the target variable `shares` is very large, but the mean, median, and mode are more close to its minimum.
+
+## 2.2 Histogram of the data
+
+We plot the histogram of `shares` to have a better understanding of the distribution
+```{r}
+hist(y, breaks=2000, main = "Histogram of Shares", xlab = "Shares")
+```
+
+We clearly see that this distribution is very right-skewed and the shares are highly concentrated around 0 to 1000. Let's make the range of x axis smaller:
+
+```{r}
+par(mfrow=c(2,2))
+hist(y, breaks=100000, main = "Histogram of Shares (0-500)", xlab = "Shares",
+     xlim = c(0, 500))
+hist(y, breaks=100000, main = "Histogram of Shares (0-1000)", xlab = "Shares",
+     xlim = c(0, 1000))
+hist(y, breaks=10000, main = "Histogram of Shares (0-5000)", xlab = "Shares", 
+     xlim = c(0, 5000))
+hist(y, breaks=10000, main = "Histogram of Shares (0-30000)", xlab = "Shares", 
+     xlim = c(0, 30000))
+```
+
+From the plots, we can see that most shares are concentrated in the interval $[0, 5000]$. 
+
+## 2.3 Principal Component Analysis and Visualization
+
+In order to have a deeper understanding of the distribution and divide the region, we conduct a PCA analysis:
+```{r}
+x = news[,1:58]
+# Two Principle Components
+pcafit <- princomp(x)
+pc1 <- matrix(princomp(x)$loadings[,1])
+pc2 <- matrix(princomp(x)$loadings[,2])
+plot(pcafit$scores[,1], pcafit$scores[,2], xlab = "First PC", ylab = "Second PC", 
+     pch = 19, cex.lab = 1.5)
+abline(h = 0, col = "deepskyblue", lwd = 4)
+abline(v = 0, col = "darkorange", lwd = 4)
+```
+
+The variance of the PCs:
+```{r}
+plot(pcafit, type = "l", pch = 19, main = "Different PCs Variances")
+```
+
+Clearly, we can see that the data points has certain patterns, and we may conduct regression and classification analysis to investigate these patterns.
+
+3D. 
+```{r }
+pcs <- prcomp(x)
+
+# 3d visualization 
+axis = pcs$x
+Prin1 = axis[,1]
+Prin2 = axis[,2]
+Prin3 = axis[,3]
+scatter3D(Prin1, Prin2, Prin3, bty = "g", pch = 18, 
+          pch = 18, ticktype = "detailed",
+          colkey = list(at = c(2, 3, 4), side = 1, 
+          addlines = TRUE, length = 0.5, width = 0.5) )
+```
+
+# Part 3: Linear Regression Analysis
+
+```{r }
+lin.fit = lm(shares ~., data=news)
+#which(colnames(news) == "weekday_is_sunday")
+#which(colnames(news) == "is_weekend")
+#which(colnames(news) == "shares")
+pvals <- summary(lin.fit)$coef[-1,4]
+sig.vars <- colnames(news[,-c(36:37, 59)])[pvals < 0.05]
+sig.vars
+```
+
+With repect to the p-values returned by `lm`, we have successfully screened out insignificant variables and obtained the above list containing variables with high impacts on determining shares in a linear regression.But we do not know how good they are in predicting news popularity since we have not yet examined their collinearity.
+
+```{r }
+lm.ridge(shares ~ .-1, data=news, lambda = 5)
+```
+
+We observe that the variance for some of the corresponding $\beta$ are extremely large, hence high collinearity. We then want to further use penalized linear model to see if we can make good predictions.
+
+```{r}
+set.seed(432)
+index = c()
+for(i in 1:length(sig.vars)) {
+  index = c(index, which(colnames(news) == sig.vars[i]))
+}
+rid.fit = cv.glmnet(as.matrix(news[,index]), news$shares, 
+                    type.measure = "mse", nfolds = 10,
+                    alpha = 0)
+pred = predict(rid.fit, newx = as.matrix(news[,index]), s = "lambda.min")
+hist(pred, breaks=100, main = "Histogram of Prediction Results", xlab = "predicted values")
+```
+
+Let's now see the plot of true shares vs Prediction
+
+```{r}
+plot(pred ~ news$shares, xlab = "True shares", ylab = "Prediction")
+```
+
+The prediction and the true shares seem not to be positive correlated. The points are concentrated at the left corner. Also this is less meaningful to us since compared with other types of responses such as stock price, we may not want the exact number of shares, but rather a clear indicator of popularity. Therefore we conclude that linear regression does not befit our overall mission well. But still, we have found some variables that are influential to the news shares.
+
+
+# Part 4: Variable Selection and Classification
+
+Now we turn to classfication. At first, we would like to do the variable slection and prune the not significant ones. After that, we perform classification on the top 10 variables.
+
+## 4.1 News shares categorization
+
+To reduce the range, we take the logarithm of `shares` and plot the histograms again:
+```{r}
+# log
+hist(log(news$shares), breaks=200, main = "Histogram of log(Shares)", xlab = "log(Shares)")
+```
+
+Now the data are more concentrated to its center.
+
+We then divide `shares` into 3 categories: `low`, `med` and `high` based on the quantile of `log(shares)`:
+
+```{r, eval=TRUE}
+news$shares = log(news$shares)
+q = quantile(news$shares, c(1/3, 2/3))
+
+# three classes
+news$shares = ifelse(news$shares < q[1], "low",
+                ifelse(news$shares >= q[1] & news$shares < q[2], "medium",
+                  ifelse(news$shares >=q[2], "high", "NA")))
+news$shares = factor(news$shares, levels = c("low","medium","high"))
+
+ggplot(news) +
+  aes(x = shares, fill = shares) +
+  geom_bar()
+```
+
+
+## 4.2 Train-Test Separation:
+
+Now we do the Train-Test Separation.
+
+```{r,eval=TRUE}
+# 80% train and 20% test
+set.seed(123)
+smp_size = floor(0.8 * nrow(news))
+train_id = sample(seq_len(smp_size), size = smp_size)
+train = data.frame(news[train_id,])
+test = data.frame(news[-train_id,])
+
+xtrain = train[,-ncol(train)]
+ytrain = train[,ncol(train)]
+xtest = test[,-ncol(test)]
+ytest = test[,ncol(test)]
+```
+
+
+## 4.3 Random Forest & Boosting 
+
+The functions in packages `randomForest` and `adaboost` allow us to fit the random forest model and the boosting model. Each of them has functionality that allows us to find the importance of each variable. We use these functions to help us select significant features.
+
+- Random Forest
+
+```{r, eval=TRUE}
+forest_model = randomForest(xtrain, ytrain, importance = TRUE)
+rf.pred <- predict(forest_model, xtest)
+cat("The accuracy of random forest is", mean(rf.pred == ytest), "\n")
+print("Confusion matrix")
+table(rf.pred, ytest)
+```
+
+We can see that the random forest model has around 50% accuracy.
+
+- Boosting & importance
+
+```{r, eval=TRUE}
+newtrain = train
+newtrain$shares = as.factor(newtrain$shares)
+pop.adaboost <- boosting(shares ~.,data=newtrain, mfinal=10,
+                         control=rpart.control(maxdepth=3))
+pop.adaboost.pred <- predict.boosting(pop.adaboost,newdata=test)
+cat("The accuracy of boosting is", mean(pop.adaboost.pred$class == ytest), "\n")
+print("Confusion matrix")
+pop.adaboost.pred$confusion
+```
+
+We can see that the boosting model has 45% accuracy.
+
+Both of the model perform better than random guess (1/3). Now we extract the most important variables in fitting the models.
+
+```{r,eval=TRUE}
+# importance
+print("Importance from boosting")
+imp_boost = sort(pop.adaboost$importance, decreasing = TRUE)
+imp_boost = imp_boost[imp_boost>0 & !is.na(imp_boost)]
+imp_boost[1:min(length(imp_boost), 10)]
+
+print("Importance from random forest")
+# mean decrease accuracy
+imp = forest_model$importance
+imp_forest = sort(imp[, ncol(imp)-1], decreasing = TRUE)
+imp_forest = imp_forest[imp_forest>0 & !is.na(imp_forest)]
+imp_forest[1:min(length(imp_forest), 10)]
+
+```
+
+We take their union to be our selected features:
+
+```{r,eval=TRUE}
+x = names(imp_boost[1:min(length(imp_boost), 10)])
+y = names(imp_forest[1:min(length(imp_forest), 10)])
+feature_sel = union(x, y)
+print(feature_sel)
+```
+
+# Part 5: Fit classfication
+
+Now we have selected the variables, we fit different classifications models
+
+## 5.1 Logistic Regression
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+xtrain_sel = xtrain[feature_sel]
+xtest_sel = xtest[feature_sel]
+# Logistic Regression.
+log_fit = cv.glmnet(as.matrix(xtrain_sel), as.matrix(ytrain), family = "multinomial",
+                    type.measure = "class",
+                    type.multinomial = "grouped",
+                    alpha = 0.5, parallel = TRUE)
+ypred = predict(log_fit, newx = as.matrix(xtest_sel), s="lambda.min",type = "class")
+cat("The accuracy of the logistic regression is", mean(ypred == ytest), "\n")
+print("The confusion matrix:")
+table(ypred, ytest)
+plot(log_fit)
+```
+
+## 5.2 K Nearest Neighbors
+
+We try k = 1, 3, 5, 10, 20, 30, 50, 100, 200, 300, 350 and 400.
+```{r,eval=TRUE}
+#knn
+k = c(1,3,5,10,20,30,50,100,200, 300, 350, 400)
+accu = rep(0, length(k))
+for(i in 1:length(k)){
+  nn = knn(xtrain_sel, xtest_sel, cl = ytrain, k = k[i])
+  accu[i] = mean(nn == ytest)
+}
+plot(k, accu, xlab = "k", ylab = "accuracy", main = "Accuracy for Knn model")
+k[which.max(accu)]
+```
+
+We can see that the highest accuracy is reached when k = 400. 
+
+```{r, eval=TRUE}
+# accuracy
+cat("The highest accuracy is ", max(accu), "\n")
+```
+
+## 5.3 Support Vector Machines
+
+```{r, eval=TRUE}
+svm_model = svm(xtrain_sel, factor(ytrain))
+svm_pred = predict(svm_model, data.matrix(xtest_sel))
+cat("The accuracy is", mean(svm_pred == ytest), "\n")
+print("The confusion matrix:")
+print(table(svm_pred, ytest))
+```
+
+# Part 6: Conclusion and discussion
+
+From the analysis above, we saw that the regression method did not perform well on the dataset. The fitted value vs Prediction plot did not show a positive correlation. 
+
+We changed our analysis into classification method. After transforming and dividing the target variable `shares` into three categories, we used boosting and random forest to find the most important variables, some of them are `kw_avg_avg`, `is_weekend`, `self_reference_avg_sharess`. Also this method helped to reveal important variable such as `is_weekend` that regression analysis failed to show previously.
+
+We then chose these variables and fitted other classification models, including logistic regression, K-Nearest Neighbor and Support Vector Machine. All of them produced accuracy above 0.4, which is better than random guess.
+
+Finally by taking the union of variables selected by regression and classification analysis, we have these resulting variables:
+
+```{r, echo=FALSE,eval=TRUE}
+union(sig.vars, feature_sel)
+```
+
+The Data set gives brief explanations to these features:
+
+1. `n_tokens_title`: Number of words in the title
+
+2. `n_tokens_content`: Number of words in the content
+
+3. `n_unique_tokens`: Rate of unique words in the content
+
+4. `num_hrefs`: Number of links 
+
+5. `num_self_hrefs`: Number of links to other articles published by Mashable 
+
+6. `average_token_length`: Average length of the words in the content 
+
+7. `data_channel_is_lifestyle`: Is data channel 'Lifestyle'? 
+
+8. `data_channel_is_entertainment`: Is data channel 'Entertainment'? 
+
+9. `data_channel_is_bus`: Is data channel 'Business'? 
+
+10. `data_channel_is_tech`: Is data channel 'Tech'? 
+
+11. `data_channel_is_socmed`:  Is data channel 'Social Media'? 
+
+12. `kw_min_avg`: Avg. keyword (min. shares)
+
+13. `kw_max_avg`: Avg. keyword (max. shares)
+
+14. `kw_avg_avg`: Avg. keyword (avg. shares)
+
+15. `self_reference_min_shares`: Min. shares of referenced articles in Mashable
+
+16. `self_reference_max_sharess`: Max. shares of referenced articles in Mashable 
+
+17. `self_reference_avg_sharess`: Avg. shares of referenced articles in Mashable 
+
+18. `global_subjectivity`: Text subjectivity 
+
+19. `is_weekend`: Was the article published on the weekend? 
+
+20. `LDA_02`: Closeness to LDA topic 2 
+
+21. `LDA_04`: Closeness to LDA topic 4 
+
+Thus we may conclude that the popularity of a news tweet is highly associated with the number of words it has, both in the title and content; The uniqueness and length of words; The number of links and referenced articles on Mashable; The data channel, with lifestyle, entertainment, business, technology and social media being the most influential ones; The usage of keywords; The subjectivity of text; The time it was published (preferably weekend), and finally its closeness to each Latent Dirichlet allocation topics (with LDA topic 2 and 4 being mostly featured according to our study).
+
+One of the pitfalls may be how we divided the target variable into classes. We found out that the categorization would have a greater impact on accuracy than classification methods. If we divide data by quantile, the accuracy kept being around 0.4 to 0.5. However if we change the cut-off, say $[0,500)$ is "low", $[500, 1000)$ is "medium" and $[1000, \infty)$ is "high", then the accuracy could be a little bit higher (0.6 to 0.7). But that also has apparent flaws, for example less to none classification results will be "low" or "medium", and the majority will be "high", hence giving a false positive.
+
+One potential solution is to conduct clustering analysis to observe the outlier and produce more reliable division.
+
+
+# Part 7: Citation and other works related:
+
+1) https://archive.ics.uci.edu/ml/datasets/online+news+popularity
+2) https://pdfs.semanticscholar.org/ad7f/3da7a5d6a1e18cc5a176f18f52687b912fea.pdf
+
+# Part 8: Technical references
+
+1) https://stackoverflow.com/questions/8175912/load-multiple-packages-at-once
